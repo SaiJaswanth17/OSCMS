@@ -1,1 +1,0 @@
-error: error communicating with database: No such host is known. (os error 11001)
