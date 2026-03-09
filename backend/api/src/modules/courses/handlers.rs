@@ -4,14 +4,12 @@ use axum::{
     response::IntoResponse,
 };
 use serde::{Deserialize, Serialize};
-use validator::Validate;
+use sqlx::Row;
+use uuid::Uuid;
 
 use crate::{
-    middleware::auth_guard::{AuthUser, require_roles},
-    utils::{
-        errors::{AppError, AppResult},
-        pagination::{PaginatedResponse, PaginationParams},
-    },
+    middleware::auth_guard::AuthUser,
+    utils::errors::{AppError, AppResult},
     AppState,
 };
 
@@ -22,103 +20,78 @@ pub struct CourseDto {
     pub name: String,
     pub description: Option<String>,
     pub credits: i32,
-    pub max_capacity: i32,
-    pub enrolled_count: Option<i64>,
-    pub department_id: String,
+    pub semester: i32,
+    pub capacity: i32,
+    pub enrolled_count: i64,
     pub department_name: Option<String>,
-    pub faculty_id: Option<String>,
-    pub faculty_name: Option<String>,
-    pub semester_id: Option<String>,
     pub is_active: bool,
 }
 
-#[derive(Debug, Deserialize, Validate)]
-pub struct CreateCourseRequest {
-    #[validate(length(min = 2, max = 20))]
-    pub code: String,
-    #[validate(length(min = 3, max = 200))]
-    pub name: String,
-    pub description: Option<String>,
-    #[validate(range(min = 1, max = 12))]
-    pub credits: i32,
-    pub max_capacity: Option<i32>,
-    pub department_id: String,
-    pub faculty_id: Option<String>,
-    pub semester_id: Option<String>,
+#[derive(Debug, Deserialize)]
+pub struct CourseFilter {
+    pub department_id: Option<String>,
+    pub semester: Option<i32>,
+    pub page: Option<i64>,
+    pub per_page: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]
-pub struct CourseFilterParams {
+pub struct CreateCourseRequest {
+    pub code: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub credits: Option<i32>,
+    pub semester: i32,
+    pub capacity: Option<i32>,
     pub department_id: Option<String>,
-    pub semester_id: Option<String>,
-    pub faculty_id: Option<String>,
-    pub is_active: Option<bool>,
-    #[serde(flatten)]
-    pub pagination: PaginationParams,
 }
 
 pub async fn list_courses(
     Extension(auth_user): Extension<AuthUser>,
     State(state): State<AppState>,
-    Query(params): Query<CourseFilterParams>,
+    Query(filter): Query<CourseFilter>,
 ) -> AppResult<impl IntoResponse> {
-    let offset = params.pagination.offset() as i64;
-    let limit = params.pagination.limit_clamped() as i64;
+    let institution_id = Uuid::parse_str(&auth_user.institution_id)
+        .map_err(|_| AppError::Unauthorized("Bad institution id".into()))?;
+    let page = filter.page.unwrap_or(1).max(1);
+    let per_page = filter.per_page.unwrap_or(20).min(100);
+    let offset = (page - 1) * per_page;
 
-    let rows = sqlx::query!(
-        r#"
-        SELECT c.id, c.code, c.name, c.description, c.credits, c.max_capacity,
-               c.department_id, d.name AS department_name,
-               c.faculty_id, CONCAT(u.first_name, ' ', u.last_name) AS faculty_name,
-               c.semester_id, c.is_active,
-               COUNT(DISTINCT e.id) AS enrolled_count,
-               COUNT(*) OVER () AS total_count
-        FROM "Course" c
-        JOIN "Department" d ON d.id = c.department_id
-        LEFT JOIN "Faculty" f ON f.id = c.faculty_id
-        LEFT JOIN "User" u ON u.id = f.user_id
-        LEFT JOIN "Enrollment" e ON e.course_id = c.id AND e.status = 'ACTIVE'
-        WHERE c.institution_id = $1
-          AND ($2::text IS NULL OR c.department_id = $2)
-          AND ($3::text IS NULL OR c.semester_id = $3)
-          AND ($4::text IS NULL OR c.faculty_id = $4)
-          AND ($5::boolean IS NULL OR c.is_active = $5)
-        GROUP BY c.id, d.name, u.first_name, u.last_name
-        ORDER BY c.code
-        LIMIT $6 OFFSET $7
-        "#,
-        auth_user.institution_id,
-        params.department_id,
-        params.semester_id,
-        params.faculty_id,
-        params.is_active,
-        limit,
-        offset
+    let rows = sqlx::query(
+        r#"SELECT c.id, c.code, c.name, c.description, c.credits, c.semester, c.capacity,
+                  d.name AS department_name, c.is_active,
+                  (SELECT COUNT(*) FROM "Enrollment" e WHERE e.course_id = c.id AND e.status = 'ACTIVE') AS enrolled_count,
+                  COUNT(*) OVER () AS total_count
+           FROM "Course" c
+           LEFT JOIN "Department" d ON d.id = c.department_id
+           WHERE c.institution_id = $1
+             AND ($2::uuid IS NULL OR c.department_id = $2::uuid)
+             AND ($3::int IS NULL OR c.semester = $3)
+           ORDER BY c.name
+           LIMIT $4 OFFSET $5"#,
     )
+    .bind(institution_id)
+    .bind(filter.department_id.as_deref().and_then(|s| Uuid::parse_str(s).ok()))
+    .bind(filter.semester)
+    .bind(per_page)
+    .bind(offset)
     .fetch_all(&state.db)
     .await?;
 
-    let total = rows.first().and_then(|r| r.total_count).unwrap_or(0) as u64;
-    let courses: Vec<CourseDto> = rows
-        .into_iter()
-        .map(|r| CourseDto {
-            id: r.id,
-            code: r.code,
-            name: r.name,
-            description: r.description,
-            credits: r.credits,
-            max_capacity: r.max_capacity,
-            enrolled_count: r.enrolled_count,
-            department_id: r.department_id,
-            department_name: r.department_name,
-            faculty_id: r.faculty_id,
-            faculty_name: r.faculty_name,
-            semester_id: r.semester_id,
-            is_active: r.is_active,
-        })
-        .collect();
+    let courses: Vec<CourseDto> = rows.into_iter().map(|r| CourseDto {
+        id: r.try_get::<Uuid, _>("id").map(|u| u.to_string()).unwrap_or_default(),
+        code: r.try_get("code").unwrap_or_default(),
+        name: r.try_get("name").unwrap_or_default(),
+        description: r.try_get("description").unwrap_or_default(),
+        credits: r.try_get("credits").unwrap_or(3),
+        semester: r.try_get("semester").unwrap_or(1),
+        capacity: r.try_get("capacity").unwrap_or(60),
+        enrolled_count: r.try_get("enrolled_count").unwrap_or(0),
+        department_name: r.try_get("department_name").unwrap_or_default(),
+        is_active: r.try_get("is_active").unwrap_or(true),
+    }).collect();
 
-    Ok(Json(PaginatedResponse::new(courses, total, &params.pagination)))
+    Ok(Json(serde_json::json!({ "data": courses })))
 }
 
 pub async fn create_course(
@@ -126,31 +99,28 @@ pub async fn create_course(
     State(state): State<AppState>,
     Json(body): Json<CreateCourseRequest>,
 ) -> AppResult<impl IntoResponse> {
-    require_roles(&auth_user, &["ADMIN"]).await?;
-    body.validate().map_err(|e| AppError::Validation(e.to_string()))?;
+    let institution_id = Uuid::parse_str(&auth_user.institution_id)
+        .map_err(|_| AppError::Unauthorized("Bad institution id".into()))?;
+    let dept_id = body.department_id.as_deref().and_then(|s| Uuid::parse_str(s).ok());
 
-    let id = sqlx::query_scalar!(
-        r#"
-        INSERT INTO "Course" (id, code, name, description, credits, max_capacity,
-                              institution_id, department_id, faculty_id, semester_id,
-                              is_active, created_at, updated_at)
-        VALUES (gen_random_uuid()::text, $1, $2, $3, $4, $5, $6, $7, $8, $9, true, NOW(), NOW())
-        RETURNING id
-        "#,
-        body.code,
-        body.name,
-        body.description,
-        body.credits,
-        body.max_capacity.unwrap_or(60),
-        auth_user.institution_id,
-        body.department_id,
-        body.faculty_id,
-        body.semester_id
+    let row = sqlx::query(
+        r#"INSERT INTO "Course" (institution_id, department_id, code, name, description, credits, semester, capacity)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+           RETURNING id::text"#,
     )
+    .bind(institution_id)
+    .bind(dept_id)
+    .bind(&body.code)
+    .bind(&body.name)
+    .bind(&body.description)
+    .bind(body.credits.unwrap_or(3))
+    .bind(body.semester)
+    .bind(body.capacity.unwrap_or(60))
     .fetch_one(&state.db)
     .await?;
 
-    Ok((StatusCode::CREATED, Json(serde_json::json!({"id": id}))))
+    let id: String = row.try_get("id").unwrap_or_default();
+    Ok((StatusCode::CREATED, Json(serde_json::json!({ "id": id }))))
 }
 
 pub async fn enroll_student(
@@ -158,44 +128,46 @@ pub async fn enroll_student(
     State(state): State<AppState>,
     Path(course_id): Path<String>,
 ) -> AppResult<impl IntoResponse> {
-    // Get student record for the current user
-    let student_id = sqlx::query_scalar!(
-        r#"SELECT id FROM "Student" WHERE user_id = $1"#,
-        auth_user.id
-    )
-    .fetch_optional(&state.db)
-    .await?
-    .ok_or_else(|| AppError::NotFound("Student profile not found".to_string()))?;
+    let uid = Uuid::parse_str(&auth_user.id)
+        .map_err(|_| AppError::Unauthorized("Bad user id".into()))?;
+    let course_uuid = Uuid::parse_str(&course_id)
+        .map_err(|_| AppError::NotFound("Course not found".into()))?;
+
+    // Get student id for this user
+    let row = sqlx::query(r#"SELECT id FROM "Student" WHERE user_id = $1"#)
+        .bind(uid)
+        .fetch_optional(&state.db)
+        .await?
+        .ok_or_else(|| AppError::NotFound("Student profile not found".into()))?;
+
+    let student_id: Uuid = row.try_get("id")?;
 
     // Check capacity
-    let course = sqlx::query!(
-        r#"
-        SELECT max_capacity,
-               (SELECT COUNT(*) FROM "Enrollment" WHERE course_id = $1 AND status = 'ACTIVE') AS enrolled
-        FROM "Course"
-        WHERE id = $1 AND is_active = true
-        "#,
-        course_id
+    let cap_row = sqlx::query(
+        r#"SELECT capacity,
+                  (SELECT COUNT(*) FROM "Enrollment" WHERE course_id = $1 AND status = 'ACTIVE') AS enrolled
+           FROM "Course" WHERE id = $1"#,
     )
+    .bind(course_uuid)
     .fetch_optional(&state.db)
     .await?
-    .ok_or_else(|| AppError::NotFound("Course not found".to_string()))?;
+    .ok_or_else(|| AppError::NotFound("Course not found".into()))?;
 
-    if course.enrolled.unwrap_or(0) >= course.max_capacity as i64 {
-        return Err(AppError::Conflict("Course is at full capacity".to_string()));
+    let capacity: i32 = cap_row.try_get("capacity").unwrap_or(60);
+    let enrolled: i64 = cap_row.try_get("enrolled").unwrap_or(0);
+    if enrolled >= capacity as i64 {
+        return Err(AppError::BadRequest("Course is at full capacity".into()));
     }
 
-    sqlx::query!(
-        r#"
-        INSERT INTO "Enrollment" (id, student_id, course_id, status, enrolled_at)
-        VALUES (gen_random_uuid()::text, $1, $2, 'ACTIVE', NOW())
-        ON CONFLICT (student_id, course_id) DO NOTHING
-        "#,
-        student_id,
-        course_id
+    sqlx::query(
+        r#"INSERT INTO "Enrollment" (student_id, course_id, status)
+           VALUES ($1, $2, 'ACTIVE')
+           ON CONFLICT (student_id, course_id) DO UPDATE SET status = 'ACTIVE'"#,
     )
+    .bind(student_id)
+    .bind(course_uuid)
     .execute(&state.db)
     .await?;
 
-    Ok((StatusCode::CREATED, Json(serde_json::json!({"message": "Enrolled successfully"}))))
+    Ok(Json(serde_json::json!({"message": "Enrolled successfully"})))
 }

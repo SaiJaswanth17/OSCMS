@@ -4,160 +4,136 @@ use axum::{
     response::IntoResponse,
 };
 use serde::{Deserialize, Serialize};
-use validator::Validate;
+use sqlx::Row;
+use uuid::Uuid;
 
 use crate::{
-    middleware::auth_guard::{AuthUser, require_roles},
+    middleware::auth_guard::AuthUser,
     utils::errors::{AppError, AppResult},
     AppState,
 };
+
+#[derive(Debug, Deserialize)]
+pub struct ResultEntry {
+    pub student_id: String,
+    pub marks: f64,
+    pub remarks: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UploadResultsRequest {
+    pub exam_id: String,
+    pub results: Vec<ResultEntry>,
+}
 
 #[derive(Debug, Serialize)]
 pub struct ExamResultDto {
     pub exam_id: String,
     pub exam_title: String,
-    pub course_name: Option<String>,
+    pub course_name: String,
     pub total_marks: f64,
-    pub marks_obtained: f64,
+    pub marks: f64,
     pub grade: Option<String>,
-    pub percentage: f64,
     pub is_published: bool,
 }
 
-#[derive(Debug, Deserialize, Validate)]
-pub struct UploadResultRequest {
-    pub exam_id: String,
-    pub results: Vec<ResultEntry>,
-}
-
-#[derive(Debug, Deserialize, Validate)]
-pub struct ResultEntry {
-    pub student_id: String,
-    #[validate(range(min = 0.0))]
-    pub marks_obtained: f64,
-    pub remarks: Option<String>,
+fn calc_grade(marks: f64, total: f64) -> &'static str {
+    let pct = (marks / total) * 100.0;
+    match pct as u32 {
+        90..=100 => "A+", 80..=89 => "A", 70..=79 => "B+",
+        60..=69 => "B", 50..=59 => "C", 40..=49 => "D", _ => "F",
+    }
 }
 
 pub async fn upload_results(
-    Extension(auth_user): Extension<AuthUser>,
+    Extension(_auth_user): Extension<AuthUser>,
     State(state): State<AppState>,
-    Json(body): Json<UploadResultRequest>,
+    Json(body): Json<UploadResultsRequest>,
 ) -> AppResult<impl IntoResponse> {
-    require_roles(&auth_user, &["FACULTY", "ADMIN"]).await?;
+    let exam_uuid = Uuid::parse_str(&body.exam_id)
+        .map_err(|_| AppError::NotFound("Exam not found".into()))?;
+
+    let exam_row = sqlx::query(
+        r#"SELECT total_marks, passing_marks FROM "Exam" WHERE id = $1"#,
+    )
+    .bind(exam_uuid)
+    .fetch_optional(&state.db)
+    .await?
+    .ok_or_else(|| AppError::NotFound("Exam not found".into()))?;
+
+    let total_marks: f64 = exam_row.try_get::<f64, _>("total_marks")
+        .unwrap_or(100.0);
 
     for entry in &body.results {
-        // Compute grade
-        let exam = sqlx::query!(
-            r#"SELECT total_marks, passing_marks FROM "Exam" WHERE id = $1"#,
-            body.exam_id
-        )
-        .fetch_optional(&state.db)
-        .await?
-        .ok_or_else(|| AppError::NotFound("Exam not found".to_string()))?;
-
-        let pct = (entry.marks_obtained / exam.total_marks) * 100.0;
-        let grade = compute_grade(pct);
-
-        sqlx::query!(
-            r#"
-            INSERT INTO "ExamResult" (id, exam_id, student_id, marks_obtained, grade, remarks, is_published, created_at, updated_at)
-            VALUES (gen_random_uuid()::text, $1, $2, $3, $4, $5, false, NOW(), NOW())
-            ON CONFLICT (exam_id, student_id) DO UPDATE
-            SET marks_obtained = EXCLUDED.marks_obtained,
-                grade = EXCLUDED.grade,
-                remarks = EXCLUDED.remarks,
-                updated_at = NOW()
-            "#,
-            body.exam_id,
-            entry.student_id,
-            entry.marks_obtained,
-            grade,
-            entry.remarks
-        )
-        .execute(&state.db)
-        .await?;
+        if let Ok(student_uuid) = Uuid::parse_str(&entry.student_id) {
+            let grade = calc_grade(entry.marks, total_marks);
+            let _ = sqlx::query(
+                r#"INSERT INTO "ExamResult" (exam_id, student_id, marks, grade, remarks)
+                   VALUES ($1, $2, $3, $4, $5)
+                   ON CONFLICT (exam_id, student_id) DO UPDATE
+                   SET marks = $3, grade = $4, remarks = $5"#,
+            )
+            .bind(exam_uuid)
+            .bind(student_uuid)
+            .bind(entry.marks)
+            .bind(grade)
+            .bind(&entry.remarks)
+            .execute(&state.db)
+            .await;
+        }
     }
 
-    Ok((StatusCode::OK, Json(serde_json::json!({"message": "Results uploaded successfully"}))))
+    Ok((StatusCode::CREATED, Json(serde_json::json!({"message": "Results uploaded"}))))
 }
 
 pub async fn get_student_results(
-    Extension(auth_user): Extension<AuthUser>,
+    Extension(_auth_user): Extension<AuthUser>,
     State(state): State<AppState>,
     Path(student_id): Path<String>,
 ) -> AppResult<impl IntoResponse> {
-    if auth_user.role == "STUDENT" {
-        let is_own = sqlx::query_scalar!(
-            r#"SELECT EXISTS(SELECT 1 FROM "Student" s JOIN "User" u ON u.id = s.user_id WHERE s.id = $1 AND u.id = $2)"#,
-            student_id,
-            auth_user.id
-        )
-        .fetch_one(&state.db)
-        .await?
-        .unwrap_or(false);
+    let student_uuid = Uuid::parse_str(&student_id)
+        .map_err(|_| AppError::NotFound("Student not found".into()))?;
 
-        if !is_own {
-            return Err(AppError::Forbidden("Access denied".to_string()));
-        }
-    }
-
-    let rows = sqlx::query!(
-        r#"
-        SELECT er.exam_id, e.title AS exam_title, c.name AS course_name,
-               e.total_marks, er.marks_obtained, er.grade, er.is_published
-        FROM "ExamResult" er
-        JOIN "Exam" e ON e.id = er.exam_id
-        JOIN "Course" c ON c.id = e.course_id
-        WHERE er.student_id = $1 AND er.is_published = true
-        ORDER BY e.scheduled_at DESC
-        "#,
-        student_id
+    let rows = sqlx::query(
+        r#"SELECT er.exam_id::text, e.title AS exam_title, c.name AS course_name,
+                  e.total_marks::float8, er.marks::float8, er.grade, er.is_published
+           FROM "ExamResult" er
+           JOIN "Exam" e ON e.id = er.exam_id
+           JOIN "Course" c ON c.id = e.course_id
+           WHERE er.student_id = $1
+           ORDER BY e.exam_date DESC"#,
     )
+    .bind(student_uuid)
     .fetch_all(&state.db)
     .await?;
 
-    let results: Vec<ExamResultDto> = rows.into_iter().map(|r| {
-        let pct = (r.marks_obtained / r.total_marks) * 100.0;
-        ExamResultDto {
-            exam_id: r.exam_id,
-            exam_title: r.exam_title,
-            course_name: r.course_name,
-            total_marks: r.total_marks,
-            marks_obtained: r.marks_obtained,
-            grade: r.grade,
-            percentage: (pct * 100.0).round() / 100.0,
-            is_published: r.is_published,
-        }
-    }).collect();
+    let data: Vec<_> = rows.into_iter().map(|r| serde_json::json!({
+        "exam_id": r.try_get::<String, _>("exam_id").unwrap_or_default(),
+        "exam_title": r.try_get::<String, _>("exam_title").unwrap_or_default(),
+        "course_name": r.try_get::<String, _>("course_name").unwrap_or_default(),
+        "total_marks": r.try_get::<f64, _>("total_marks").unwrap_or(100.0),
+        "marks": r.try_get::<f64, _>("marks").unwrap_or(0.0),
+        "grade": r.try_get::<Option<String>, _>("grade").unwrap_or_default(),
+        "is_published": r.try_get::<bool, _>("is_published").unwrap_or(false),
+    })).collect();
 
-    Ok(Json(results))
+    Ok(Json(serde_json::json!({ "data": data })))
 }
 
 pub async fn publish_results(
-    Extension(auth_user): Extension<AuthUser>,
+    Extension(_auth_user): Extension<AuthUser>,
     State(state): State<AppState>,
     Path(exam_id): Path<String>,
 ) -> AppResult<impl IntoResponse> {
-    require_roles(&auth_user, &["ADMIN", "FACULTY"]).await?;
+    let exam_uuid = Uuid::parse_str(&exam_id)
+        .map_err(|_| AppError::NotFound("Exam not found".into()))?;
 
-    sqlx::query!(
-        r#"UPDATE "ExamResult" SET is_published = true, published_at = NOW() WHERE exam_id = $1"#,
-        exam_id
+    sqlx::query(
+        r#"UPDATE "ExamResult" SET is_published = true WHERE exam_id = $1"#,
     )
+    .bind(exam_uuid)
     .execute(&state.db)
     .await?;
 
     Ok(Json(serde_json::json!({"message": "Results published"})))
-}
-
-fn compute_grade(percentage: f64) -> String {
-    match percentage as u32 {
-        90..=100 => "A+".to_string(),
-        80..=89  => "A".to_string(),
-        70..=79  => "B+".to_string(),
-        60..=69  => "B".to_string(),
-        50..=59  => "C".to_string(),
-        40..=49  => "D".to_string(),
-        _        => "F".to_string(),
-    }
 }

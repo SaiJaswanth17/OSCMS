@@ -1,0 +1,89 @@
+warning: profiles for the non root package will be ignored, specify profiles at the workspace root:
+package:   C:\Antigravity\OCMS\backend\api\Cargo.toml
+workspace: C:\Antigravity\OCMS\backend\Cargo.toml
+   Compiling api v0.1.0 (C:\Antigravity\OCMS\backend\api)
+error[E0425]: cannot find type `BigDecimal` in module `sqlx::types`
+  --> api\src\modules\exams\handlers.rs:64:60
+   |
+64 |     let total_marks: f64 = exam_row.try_get::<sqlx::types::BigDecimal, _>("total_marks")
+   |                                                            ^^^^^^^^^^ not found in `sqlx::types`
+
+warning: unused import: `JwtConfig`
+ --> api\src\middleware\auth_guard.rs:9:39
+  |
+9 | use crate::{auth::jwt::{verify_token, JwtConfig}, utils::errors::AppError, AppState};
+  |                                       ^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `PaginationParams`
+  --> api\src\modules\students\handlers.rs:12:92
+   |
+12 |     utils::{errors::{AppError, AppResult}, pagination::{PaginatedResponse, PaginationMeta, PaginationParams}},
+   |                                                                                            ^^^^^^^^^^^^^^^^
+
+warning: unused import: `Json`
+ --> api\src\modules\faculty\handlers.rs:2:26
+  |
+2 |     extract::{Extension, Json, Path, Query, State},
+  |                          ^^^^
+
+warning: unused import: `Serialize`
+ --> api\src\modules\attendance\handlers.rs:6:26
+  |
+6 | use serde::{Deserialize, Serialize};
+  |                          ^^^^^^^^^
+
+warning: unused imports: `Path` and `http::StatusCode`
+ --> api\src\modules\notifications\handlers.rs:2:32
+  |
+2 |     extract::{Extension, Json, Path, State},
+  |                                ^^^^
+3 |     http::StatusCode,
+  |     ^^^^^^^^^^^^^^^^
+
+warning: unused import: `Deserialize`
+ --> api\src\modules\notifications\handlers.rs:6:13
+  |
+6 | use serde::{Deserialize, Serialize};
+  |             ^^^^^^^^^^^
+
+error[E0560]: struct `PaginationMeta` has no field named `per_page`
+  --> api\src\modules\students\handlers.rs:94:13
+   |
+94 |             per_page: per_page as u64,
+   |             ^^^^^^^^ `PaginationMeta` does not have this field
+   |
+   = note: available fields are: `limit`, `has_next`, `has_prev`
+
+error[E0560]: struct `PaginationMeta` has no field named `per_page`
+  --> api\src\modules\faculty\handlers.rs:87:13
+   |
+87 |             per_page: per_page as u64,
+   |             ^^^^^^^^ `PaginationMeta` does not have this field
+   |
+   = note: available fields are: `limit`, `has_next`, `has_prev`
+
+error[E0282]: type annotations needed
+  --> api\src\modules\exams\handlers.rs:65:15
+   |
+65 |         .map(|d| d.to_string().parse::<f64>().unwrap_or(100.0))
+   |               ^  - type must be known at this point
+   |
+help: consider giving this closure parameter an explicit type
+   |
+65 |         .map(|d: /* Type */| d.to_string().parse::<f64>().unwrap_or(100.0))
+   |                ++++++++++++
+
+warning: unused variable: `auth_user`
+  --> api\src\modules\attendance\handlers.rs:81:15
+   |
+81 |     Extension(auth_user): Extension<AuthUser>,
+   |               ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_auth_user`
+   |
+   = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+Some errors have detailed explanations: E0282, E0425, E0560.
+For more information about an error, try `rustc --explain E0282`.
+warning: `api` (bin "api") generated 7 warnings
+error: could not compile `api` (bin "api") due to 4 previous errors; 7 warnings emitted

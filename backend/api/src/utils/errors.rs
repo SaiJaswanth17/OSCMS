@@ -17,6 +17,9 @@ pub enum AppError {
     #[error("Not found: {0}")]
     NotFound(String),
 
+    #[error("Bad request: {0}")]
+    BadRequest(String),
+
     #[error("Validation error: {0}")]
     Validation(String),
 
@@ -39,6 +42,7 @@ impl IntoResponse for AppError {
             AppError::Unauthorized(msg) => (StatusCode::UNAUTHORIZED, msg.clone()),
             AppError::Forbidden(msg) => (StatusCode::FORBIDDEN, msg.clone()),
             AppError::NotFound(msg) => (StatusCode::NOT_FOUND, msg.clone()),
+            AppError::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg.clone()),
             AppError::Validation(msg) => (StatusCode::UNPROCESSABLE_ENTITY, msg.clone()),
             AppError::Conflict(msg) => (StatusCode::CONFLICT, msg.clone()),
             AppError::Database(e) => {

@@ -1,8 +1,8 @@
 use axum::{
-    middleware,
-    routing::{delete, get, post, put},
+    routing::{delete, get, post},
     Router,
 };
+use axum::middleware as axum_mw;
 use sqlx::PgPool;
 use std::sync::Arc;
 use tower_http::{
@@ -13,12 +13,12 @@ use tower_http::{
 use tracing::info;
 
 mod auth;
-mod middleware as mw;
+mod middleware;
 mod modules;
 mod utils;
 
 use auth::jwt::JwtConfig;
-use mw::auth_guard::auth_middleware;
+use middleware::auth_guard::auth_middleware;
 
 // ─────────────────────────────────────────────
 // App State
@@ -36,10 +36,8 @@ pub struct AppState {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // Load .env
     dotenvy::dotenv().ok();
 
-    // Initialize tracing
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::from_env("LOG_LEVEL")
@@ -51,20 +49,16 @@ async fn main() -> anyhow::Result<()> {
 
     info!("Starting OCMS API server...");
 
-    // Database pool
-    let database_url = std::env::var("DATABASE_URL")
-        .expect("DATABASE_URL must be set");
+    let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
     let db = sqlx::PgPool::connect(&database_url).await?;
 
-    // Run migrations
-    sqlx::migrate!("../../prisma/migrations").run(&db).await?;
+    info!("Connected to Supabase successfully");
 
     let state = AppState {
         db,
         jwt_config: Arc::new(JwtConfig::from_env()),
     };
 
-    // Router
     let app = build_router(state);
 
     let port = std::env::var("PORT").unwrap_or_else(|_| "8080".to_string());
@@ -78,39 +72,30 @@ async fn main() -> anyhow::Result<()> {
 }
 
 fn build_router(state: AppState) -> Router {
-    // Public routes (no auth required)
     let public_routes = Router::new()
         .route("/api/auth/login", post(auth::handlers::login))
         .route("/api/health", get(health_check));
 
-    // Protected routes
     let protected_routes = Router::new()
-        // Auth
         .route("/api/auth/me", get(auth::handlers::me))
         .route("/api/auth/logout", post(auth::handlers::logout))
-        // Students
         .route("/api/students", get(modules::students::handlers::list_students))
         .route("/api/students/:id", get(modules::students::handlers::get_student))
         .route("/api/students/:id", delete(modules::students::handlers::delete_student))
-        // Faculty
         .route("/api/faculty", get(modules::faculty::handlers::list_faculty))
         .route("/api/faculty/:id", get(modules::faculty::handlers::get_faculty))
-        // Courses
         .route("/api/courses", get(modules::courses::handlers::list_courses))
         .route("/api/courses", post(modules::courses::handlers::create_course))
         .route("/api/courses/:id/enroll", post(modules::courses::handlers::enroll_student))
-        // Attendance
         .route("/api/attendance/mark", post(modules::attendance::handlers::mark_attendance))
         .route("/api/attendance/student/:id", get(modules::attendance::handlers::get_student_attendance))
-        // Exams
         .route("/api/results/upload", post(modules::exams::handlers::upload_results))
         .route("/api/results/student/:id", get(modules::exams::handlers::get_student_results))
         .route("/api/results/exam/:id/publish", post(modules::exams::handlers::publish_results))
-        // Notifications
         .route("/api/notifications", get(modules::notifications::handlers::get_notifications))
         .route("/api/notifications/read-all", post(modules::notifications::handlers::mark_notifications_read))
         .route("/api/notifications/unread-count", get(modules::notifications::handlers::get_unread_count))
-        .layer(middleware::from_fn_with_state(state.clone(), auth_middleware));
+        .layer(axum_mw::from_fn_with_state(state.clone(), auth_middleware));
 
     let cors = CorsLayer::new()
         .allow_origin(Any)
