@@ -1,0 +1,437 @@
+// OCMS Prisma Schema
+// Database: Supabase (PostgreSQL)
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─────────────────────────────────────────────
+// Enums
+// ─────────────────────────────────────────────
+
+enum Role {
+  STUDENT
+  FACULTY
+  ADMIN
+  DEPT_HEAD
+}
+
+enum Gender {
+  MALE
+  FEMALE
+  OTHER
+  PREFER_NOT_TO_SAY
+}
+
+enum AttendanceStatus {
+  PRESENT
+  ABSENT
+  LATE
+  EXCUSED
+}
+
+enum ExamType {
+  MIDTERM
+  FINAL
+  QUIZ
+  ASSIGNMENT
+  LAB
+}
+
+enum NotificationType {
+  INFO
+  WARNING
+  SUCCESS
+  EXAM
+  ATTENDANCE
+  GRADE
+  ANNOUNCEMENT
+}
+
+enum EnrollmentStatus {
+  ACTIVE
+  DROPPED
+  COMPLETED
+  WAITLISTED
+}
+
+enum SemesterType {
+  FALL
+  SPRING
+  SUMMER
+  WINTER
+}
+
+// ─────────────────────────────────────────────
+// Institution (Multi-Tenant)
+// ─────────────────────────────────────────────
+
+model Institution {
+  id          String   @id @default(cuid())
+  name        String
+  code        String   @unique
+  domain      String?  @unique
+  logoUrl     String?
+  address     String?
+  phone       String?
+  email       String?
+  website     String?
+  primaryColor String? @default("#1a2ae6")
+  accentColor  String? @default("#6c63ff")
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  users       User[]
+  departments Department[]
+  courses     Course[]
+  semesters   Semester[]
+  exams       Exam[]
+  announcements Announcement[]
+
+  @@index([code])
+}
+
+// ─────────────────────────────────────────────
+// Semester
+// ─────────────────────────────────────────────
+
+model Semester {
+  id            String       @id @default(cuid())
+  name          String
+  type          SemesterType
+  year          Int
+  startDate     DateTime
+  endDate       DateTime
+  isActive      Boolean      @default(false)
+  institutionId String
+  createdAt     DateTime     @default(now())
+
+  institution   Institution  @relation(fields: [institutionId], references: [id])
+  courses       Course[]
+  exams         Exam[]
+
+  @@index([institutionId, isActive])
+}
+
+// ─────────────────────────────────────────────
+// User (Base Identity)
+// ─────────────────────────────────────────────
+
+model User {
+  id              String    @id @default(cuid())
+  email           String    @unique
+  passwordHash    String
+  role            Role
+  firstName       String
+  lastName        String
+  phone           String?
+  avatarUrl       String?
+  gender          Gender?
+  dateOfBirth     DateTime?
+  address         String?
+  isActive        Boolean   @default(true)
+  emailVerified   Boolean   @default(false)
+  lastLoginAt     DateTime?
+  institutionId   String
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  institution     Institution   @relation(fields: [institutionId], references: [id])
+  student         Student?
+  faculty         Faculty?
+  notifications   Notification[]
+  auditLogs       AuditLog[]
+  refreshTokens   RefreshToken[]
+
+  @@index([email])
+  @@index([institutionId, role])
+}
+
+model RefreshToken {
+  id        String   @id @default(cuid())
+  token     String   @unique
+  userId    String
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+// ─────────────────────────────────────────────
+// Department
+// ─────────────────────────────────────────────
+
+model Department {
+  id            String   @id @default(cuid())
+  name          String
+  code          String
+  description   String?
+  institutionId String
+  headFacultyId String?  @unique
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  institution   Institution @relation(fields: [institutionId], references: [id])
+  headFaculty   Faculty?    @relation("DepartmentHead", fields: [headFacultyId], references: [id])
+  faculty       Faculty[]   @relation("DepartmentFaculty")
+  students      Student[]
+  courses       Course[]
+
+  @@unique([code, institutionId])
+  @@index([institutionId])
+}
+
+// ─────────────────────────────────────────────
+// Student
+// ─────────────────────────────────────────────
+
+model Student {
+  id              String    @id @default(cuid())
+  userId          String    @unique
+  studentId       String    @unique
+  departmentId    String
+  enrollmentYear  Int
+  graduationYear  Int?
+  currentSemester Int       @default(1)
+  gpa             Float?    @default(0.0)
+  creditsEarned   Int       @default(0)
+  isActive        Boolean   @default(true)
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  user            User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  department      Department   @relation(fields: [departmentId], references: [id])
+  enrollments     Enrollment[]
+  attendance      Attendance[]
+  examResults     ExamResult[]
+
+  @@index([departmentId])
+  @@index([studentId])
+}
+
+// ─────────────────────────────────────────────
+// Faculty
+// ─────────────────────────────────────────────
+
+model Faculty {
+  id             String   @id @default(cuid())
+  userId         String   @unique
+  facultyId      String   @unique
+  departmentId   String
+  designation    String
+  specialization String?
+  qualification  String?
+  joiningDate    DateTime
+  isActive       Boolean  @default(true)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  user           User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  department     Department   @relation("DepartmentFaculty", fields: [departmentId], references: [id])
+  deptHead       Department?  @relation("DepartmentHead")
+  courses        Course[]
+  attendanceSessions AttendanceSession[]
+
+  @@index([departmentId])
+  @@index([facultyId])
+}
+
+// ─────────────────────────────────────────────
+// Course
+// ─────────────────────────────────────────────
+
+model Course {
+  id             String   @id @default(cuid())
+  code           String
+  name           String
+  description    String?
+  credits        Int
+  maxCapacity    Int      @default(60)
+  institutionId  String
+  departmentId   String
+  facultyId      String?
+  semesterId     String?
+  isActive       Boolean  @default(true)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  institution    Institution  @relation(fields: [institutionId], references: [id])
+  department     Department   @relation(fields: [departmentId], references: [id])
+  faculty        Faculty?     @relation(fields: [facultyId], references: [id])
+  semester       Semester?    @relation(fields: [semesterId], references: [id])
+  enrollments    Enrollment[]
+  attendanceSessions AttendanceSession[]
+  exams          Exam[]
+
+  @@unique([code, institutionId, semesterId])
+  @@index([institutionId, departmentId])
+  @@index([facultyId])
+}
+
+// ─────────────────────────────────────────────
+// Enrollment
+// ─────────────────────────────────────────────
+
+model Enrollment {
+  id         String           @id @default(cuid())
+  studentId  String
+  courseId   String
+  status     EnrollmentStatus @default(ACTIVE)
+  enrolledAt DateTime         @default(now())
+  droppedAt  DateTime?
+
+  student    Student  @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  course     Course   @relation(fields: [courseId], references: [id])
+
+  @@unique([studentId, courseId])
+  @@index([courseId])
+  @@index([studentId])
+}
+
+// ─────────────────────────────────────────────
+// Attendance
+// ─────────────────────────────────────────────
+
+model AttendanceSession {
+  id         String   @id @default(cuid())
+  courseId   String
+  facultyId  String
+  date       DateTime
+  topic      String?
+  createdAt  DateTime @default(now())
+
+  course     Course     @relation(fields: [courseId], references: [id])
+  faculty    Faculty    @relation(fields: [facultyId], references: [id])
+  records    Attendance[]
+
+  @@index([courseId, date])
+}
+
+model Attendance {
+  id          String           @id @default(cuid())
+  sessionId   String
+  studentId   String
+  status      AttendanceStatus @default(PRESENT)
+  remarks     String?
+  markedAt    DateTime         @default(now())
+
+  session     AttendanceSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  student     Student           @relation(fields: [studentId], references: [id], onDelete: Cascade)
+
+  @@unique([sessionId, studentId])
+  @@index([studentId])
+}
+
+// ─────────────────────────────────────────────
+// Exam & Results
+// ─────────────────────────────────────────────
+
+model Exam {
+  id            String    @id @default(cuid())
+  courseId      String
+  semesterId    String?
+  institutionId String
+  title         String
+  type          ExamType
+  totalMarks    Float
+  passingMarks  Float
+  scheduledAt   DateTime
+  duration      Int       // minutes
+  venue         String?
+  instructions  String?
+  isPublished   Boolean   @default(false)
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  course        Course       @relation(fields: [courseId], references: [id])
+  semester      Semester?    @relation(fields: [semesterId], references: [id])
+  institution   Institution  @relation(fields: [institutionId], references: [id])
+  results       ExamResult[]
+
+  @@index([courseId])
+  @@index([institutionId, scheduledAt])
+}
+
+model ExamResult {
+  id          String   @id @default(cuid())
+  examId      String
+  studentId   String
+  marksObtained Float
+  grade       String?
+  remarks     String?
+  isPublished Boolean  @default(false)
+  publishedAt DateTime?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  exam        Exam     @relation(fields: [examId], references: [id], onDelete: Cascade)
+  student     Student  @relation(fields: [studentId], references: [id], onDelete: Cascade)
+
+  @@unique([examId, studentId])
+  @@index([studentId])
+}
+
+// ─────────────────────────────────────────────
+// Notifications
+// ─────────────────────────────────────────────
+
+model Notification {
+  id        String           @id @default(cuid())
+  userId    String
+  type      NotificationType @default(INFO)
+  title     String
+  message   String
+  isRead    Boolean          @default(false)
+  link      String?
+  createdAt DateTime         @default(now())
+
+  user      User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, isRead])
+  @@index([userId, createdAt])
+}
+
+model Announcement {
+  id            String   @id @default(cuid())
+  institutionId String
+  title         String
+  content       String
+  isPublished   Boolean  @default(true)
+  publishedAt   DateTime @default(now())
+  expiresAt     DateTime?
+  createdAt     DateTime @default(now())
+
+  institution   Institution @relation(fields: [institutionId], references: [id])
+
+  @@index([institutionId, isPublished])
+}
+
+// ─────────────────────────────────────────────
+// Audit Log
+// ─────────────────────────────────────────────
+
+model AuditLog {
+  id         String   @id @default(cuid())
+  userId     String
+  action     String
+  resource   String
+  resourceId String?
+  oldData    Json?
+  newData    Json?
+  ipAddress  String?
+  userAgent  String?
+  createdAt  DateTime @default(now())
+
+  user       User @relation(fields: [userId], references: [id])
+
+  @@index([userId, createdAt])
+  @@index([resource, resourceId])
+}
